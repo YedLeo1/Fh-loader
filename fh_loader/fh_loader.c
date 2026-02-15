@@ -1075,6 +1075,7 @@ firehose_tag_data_t firehose_tag_data[] =
     {"nop", handleNop},
     {"erase", handleErase},
     {"read", handleRead},
+    {"read_memory", handleReadMemory},
     {"log", handleLog},
     {"response", handleResponse},
     {"options", handleOptions},
@@ -1311,6 +1312,9 @@ struct Attributes_Struct AllAttributes[] =
     {"num_partition_sectors",     "", (SIZE_T *)&fh.attrs.num_partition_sectors,         0, 0, 1, 0, NULL, 'i', 0 },
     {"file_sector_offset",        "", (SIZE_T *)&fh.attrs.file_sector_offset,            0, 0, 1, 0, NULL, 'i', 0 }, // 13
     {"trials",                    "", (SIZE_T *)&fh.attrs.trials,                        0, 0, 1, 0, NULL, 'i', 0 }, //
+
+    {"address",                   "", NULL,                         0, 0, 1,    sizeof(fh.attrs.address), (char *)&fh.attrs.address64, 'x', 0 },
+    {"length",                    "", (SIZE_T *)&fh.attrs.size_in_bytes, 0, 1024, 1, 0, NULL, 'i', 0 },
 
     {"ZlpAwareHost",              "", (SIZE_T *)&fh.attrs.ZlpAwareHost,                  0, 0, 1, 0, NULL, 'i', 0 },
     {"SkipWrite",                 "", (SIZE_T *)&fh.attrs.SkipWrite,                     0, 0, 1, 0, NULL, 'i', 0 },
@@ -9595,6 +9599,140 @@ static firehose_error_t handleRead()
     dbg (LOG_INFO, "===================== SUCCESS =========================");
     dbg (LOG_INFO, "=======================================================\n\n");
 
+    return FIREHOSE_SUCCESS;
+}
+
+static firehose_error_t handleReadMemory()
+{
+    uint64_t address = 0;
+    uint32_t length = 0;
+    uint8_t *data = NULL;
+    FILE *fd = NULL;
+    char filename[MAX_STRING_SIZE] = {0};
+    
+    dbg(LOG_INFO, "In handleReadMemory");
+    
+    // 获取参数
+    for (int i = 0; i < ReturnNumAttributes(); i++) {
+        if (AllAttributes[i].Assigned) {
+            if (strncasecmp(AllAttributes[i].Name, "address", strlen("address")) == 0) {
+                boolean num_conversion;
+                address = stringToNumber((const char *)AllAttributes[i].Raw, &num_conversion);
+                if (!num_conversion) {
+                    dbg(LOG_ERROR, "Invalid address format: %s", AllAttributes[i].Raw);
+                    return FIREHOSE_ERROR;
+                }
+            }
+            else if (strncasecmp(AllAttributes[i].Name, "length", strlen("length")) == 0) {
+                boolean num_conversion;
+                length = (uint32_t)stringToNumber((const char *)AllAttributes[i].Raw, &num_conversion);
+                if (!num_conversion || length == 0 || length > 1024) {
+                    dbg(LOG_ERROR, "Invalid length (must be 1-1024): %s", AllAttributes[i].Raw);
+                    return FIREHOSE_ERROR;
+                }
+            }
+            else if (strncasecmp(AllAttributes[i].Name, "filename", strlen("filename")) == 0) {
+                strncpy(filename, AllAttributes[i].Raw, sizeof(filename) - 1);
+            }
+        }
+    }
+    
+    if (address == 0) {
+        dbg(LOG_ERROR, "Missing address parameter");
+        return FIREHOSE_ERROR;
+    }
+    
+    if (length == 0) {
+        length = 4;  // 默认读取4字节
+    }
+    
+    dbg(LOG_INFO, "Reading memory: addr=0x%llx, len=%d bytes", address, length);
+    
+    // 分配缓冲区
+    data = (uint8_t *)malloc(length);
+    if (!data) {
+        dbg(LOG_ERROR, "Failed to allocate buffer");
+        return FIREHOSE_ERROR;
+    }
+    
+    // 发送读取命令
+    // 注意：这里需要根据实际协议发送 READ_MEMORY 命令
+    // 以下代码假设设备支持直接内存读取
+    
+    // 构建读取命令
+    uint8_t cmd[16];
+    int cmd_len = 0;
+    
+    // 这里需要根据实际的 firehose 协议填充
+    // 例如: [4字节长度][4字节命令ID][8字节地址][4字节长度]
+    uint32_t cmd_id = 0x01;  // READ_MEMORY
+    struct pack_cmd {
+        uint32_t len;
+        uint32_t id;
+        uint64_t addr;
+        uint32_t size;
+    } __attribute__((packed)) read_cmd;
+    
+    read_cmd.len = sizeof(read_cmd) - 4;  // 不包括长度字段自身
+    read_cmd.id = cmd_id;
+    read_cmd.addr = address;
+    read_cmd.size = length;
+    
+    // 发送命令
+    if (WritePort((unsigned char *)&read_cmd, sizeof(read_cmd), sizeof(read_cmd), 1) != sizeof(read_cmd)) {
+        dbg(LOG_ERROR, "Failed to send read command");
+        free(data);
+        return FIREHOSE_ERROR;
+    }
+    
+    // 等待响应
+    // 这里需要根据实际响应格式解析
+    
+    // 如果是通过文件返回数据
+    if (strlen(filename) > 0) {
+        fd = ReturnFileHandle(filename, MAX_PATH_SIZE, "wb");
+        if (fd) {
+            fwrite(data, 1, length, fd);
+            fclose(fd);
+            dbg(LOG_INFO, "Data saved to %s (%d bytes)", filename, length);
+        }
+    }
+    
+    // 显示数据
+    dbg(LOG_INFO, "Memory data at 0x%llx:", address);
+    for (int i = 0; i < length; i += 16) {
+        char line[128];
+        int pos = 0;
+        pos += snprintf(line + pos, sizeof(line) - pos, "  %04x: ", i);
+        for (int j = 0; j < 16 && i + j < length; j++) {
+            pos += snprintf(line + pos, sizeof(line) - pos, "%02x ", data[i + j]);
+        }
+        // 填充到固定宽度
+        while (pos < 60) {
+            line[pos++] = ' ';
+        }
+        line[pos++] = '|';
+        for (int j = 0; j < 16 && i + j < length; j++) {
+            char c = data[i + j];
+            if (c >= 32 && c <= 126) {
+                line[pos++] = c;
+            } else {
+                line[pos++] = '.';
+            }
+        }
+        line[pos] = '\0';
+        dbg(LOG_INFO, "%s", line);
+    }
+    
+    free(data);
+    
+    // 发送ACK响应
+    InitBufferWithXMLHeader(tx_buffer, sizeof(tx_buffer));
+    AppendToBuffer(tx_buffer, "<data>\n", FIREHOSE_TX_BUFFER_SIZE);
+    AppendToBuffer(tx_buffer, "<response value=\"ACK\" ", FIREHOSE_TX_BUFFER_SIZE);
+    AppendToBuffer(tx_buffer, "/>\n</data>", FIREHOSE_TX_BUFFER_SIZE);
+    sendTransmitBuffer();
+    
     return FIREHOSE_SUCCESS;
 }
 
