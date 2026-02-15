@@ -3,13 +3,9 @@ name: Build fh-loader Windows
 on:
   push:
     branches: [ main, master ]
-    paths:
-      - '**.c'
-      - '**.h'
-      - '**.yml'
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -19,27 +15,66 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        repository: Rivko/android-firmware-qti-sdm670
-        ref: main
-        path: source
+        path: repo
     
     - name: Setup MSVC
       uses: ilammy/msvc-dev-cmd@v1
+    
+    - name: Download additional source files
+      shell: powershell
+      run: |
+        # 创建临时目录
+        mkdir temp_src -Force
+        
+        # 下载原始仓库的额外源文件
+        $files = @(
+          "fh_cobs.c",
+          "fh_crc.c",
+          "fh_hsuart_packet.c",
+          "fh_transfer.c",
+          "fh_transport.c",
+          "fh_transport_com.c",
+          "fh_transport_hsuart.c",
+          "fh_transport_linux_pipe.c"
+        )
+        
+        foreach ($file in $files) {
+          $url = "https://raw.githubusercontent.com/Rivko/android-firmware-qti-sdm670/main/boot_images/QcomPkg/Tools/storage/fh_loader/$file"
+          Invoke-WebRequest -Uri $url -OutFile "temp_src/$file"
+        }
+        
+        # 下载stringl目录的文件
+        $stringl_files = @(
+          "memscpy.c",
+          "memsmove.c",
+          "strlcat.c",
+          "strlcpy.c"
+        )
+        
+        mkdir temp_src/stringl -Force
+        foreach ($file in $stringl_files) {
+          $url = "https://raw.githubusercontent.com/Rivko/android-firmware-qti-sdm670/main/boot_images/QcomPkg/Tools/storage/fh_loader/stringl/$file"
+          Invoke-WebRequest -Uri $url -OutFile "temp_src/stringl/$file"
+        }
+        
+        # 复制到工作目录
+        Copy-Item -Path "temp_src/*" -Destination "repo/fh_loader/" -Recurse -Force
       
     - name: Create build directory
       run: mkdir build
-      working-directory: source/boot_images/QcomPkg/Tools/storage/fh_loader
+      working-directory: repo/fh_loader
       
     - name: Compile fh-loader
       shell: cmd
-      working-directory: source/boot_images/QcomPkg/Tools/storage/fh_loader
+      working-directory: repo/fh_loader
       run: |
+        dir
         cl /O2 /W3 /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "_CONSOLE" ^
+          fh_loader.c ^
+          fh_loader_sha.c ^
           fh_cobs.c ^
           fh_crc.c ^
           fh_hsuart_packet.c ^
-          fh_loader.c ^
-          fh_loader_sha.c ^
           fh_transfer.c ^
           fh_transport.c ^
           fh_transport_com.c ^
@@ -49,13 +84,13 @@ jobs:
           stringl/memsmove.c ^
           stringl/strlcat.c ^
           stringl/strlcpy.c ^
-          /I. /I./stringl ^
-          /Fe:build/fh-loader.exe ^
+          /I. ^
+          /I./stringl ^
+          /Febuild/fh-loader.exe ^
           /link kernel32.lib user32.lib advapi32.lib
-          
+      
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: fh-loader-windows-x64
-        path: source/boot_images/QcomPkg/Tools/storage/fh_loader/build/fh-loader.exe
-        if-no-files-found: error
+        path: repo/fh_loader/build/fh-loader.exe
